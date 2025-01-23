@@ -14,40 +14,37 @@
 
 #include "convolutiondepthwise_riscv.h"
 
-#include "cpu.h"
-#include "layer_type.h"
-
 #if __riscv_vector
-#ifdef RVV_SPEC_0_7
-#include "riscv_v_071_fix.h"
-#else
 #include <riscv_vector.h>
-#endif
 #endif // __riscv_vector
 
 #include "riscv_activation.h"
 #include "riscv_usability.h"
 
+#include "cpu.h"
+#include "layer_type.h"
+
 namespace ncnn {
+
+#include "convolutiondepthwise_3x3.h"
 
 #if __riscv_vector
 #include "convolutiondepthwise_3x3_packn.h"
 #include "convolutiondepthwise_5x5_packn.h"
-
-#if __riscv_zfh
-#include "convolutiondepthwise_3x3_packn_fp16s.h"
-#include "convolutiondepthwise_5x5_packn_fp16s.h"
-#endif
 #endif // __riscv_vector
 
 ConvolutionDepthWise_riscv::ConvolutionDepthWise_riscv()
 {
 #if __riscv_vector
     support_packing = true;
-#if __riscv_zfh
-    support_fp16_storage = true;
-#endif
 #endif // __riscv_vector
+#if NCNN_ZFH
+#if __riscv_vector
+    support_fp16_storage = cpu_support_riscv_zvfh();
+#else
+    support_fp16_storage = cpu_support_riscv_zfh();
+#endif
+#endif
 
     activation = 0;
 }
@@ -59,8 +56,16 @@ int ConvolutionDepthWise_riscv::create_pipeline(const Option& opt)
 
     activation = create_activation_layer(activation_type, activation_params, opt);
 
-#if __riscv_vector && __riscv_zfh
-    if (opt.use_fp16_storage)
+#if NCNN_INT8
+    if (opt.use_int8_inference && weight_data.elemsize == (size_t)1u)
+    {
+        // TODO implement int8
+        return 0;
+    }
+#endif
+
+#if NCNN_ZFH
+    if (support_fp16_storage && opt.use_fp16_storage)
     {
         return create_pipeline_fp16s(opt);
     }
@@ -89,19 +94,26 @@ int ConvolutionDepthWise_riscv::create_pipeline(const Option& opt)
         if (elempack == packn)
         {
             Mat weight_data_r2 = weight_data.reshape(maxk, group);
-            convert_packing(weight_data_r2, weight_data_packed, packn, opt);
+            convert_packing(weight_data_r2, weight_data_tm, packn, opt);
         }
 #endif // __riscv_vector
 
         if (elempack == 1)
         {
+            weight_data_tm = weight_data;
         }
+
+        if (opt.lightmode)
+            weight_data.release();
 
         return 0;
     }
 
     // group convolution
     create_group_ops(opt);
+
+    if (opt.lightmode)
+        weight_data.release();
 
     return 0;
 }
@@ -124,12 +136,12 @@ int ConvolutionDepthWise_riscv::create_group_ops(const Option& opt)
 
     for (int g = 0; g < group; g++)
     {
-        Mat weight_data_g = weight_data.range(maxk * channels_g * num_output_g * g, maxk * channels_g * num_output_g);
+        Mat weight_data_g = weight_data.range(maxk * channels_g * num_output_g * g, maxk * channels_g * num_output_g).clone();
         Mat bias_data_g;
         if (bias_term)
             bias_data_g = bias_data.range(num_output_g * g, num_output_g);
 
-        ncnn::Layer* op = ncnn::create_layer(ncnn::LayerType::Convolution);
+        ncnn::Layer* op = ncnn::create_layer_cpu(ncnn::LayerType::Convolution);
 
         // set param
         ncnn::ParamDict pd;
@@ -225,7 +237,7 @@ int ConvolutionDepthWise_riscv::destroy_pipeline(const Option& opt)
 int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
 {
 #if NCNN_INT8
-    if (opt.use_int8_inference && weight_data.elemsize == (size_t)1u)
+    if (opt.use_int8_inference && int8_scale_term)
     {
         Mat bottom_blob_unpacked = bottom_blob;
         if (bottom_blob.elempack != 1)
@@ -251,9 +263,9 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
     }
 #endif
 
+#if NCNN_ZFH
     int elembits = bottom_blob.elembits();
 
-#if __riscv_vector && __riscv_zfh
     if (opt.use_fp16_storage && elembits == 16)
     {
         if (opt.use_fp16_arithmetic)
@@ -265,7 +277,7 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
 
 #if __riscv_vector
     const int packn = csrr_vlenb() / 4;
-    const word_type vl = vsetvl_e32m1(packn);
+    const size_t vl = __riscv_vsetvl_e32m1(packn);
 #endif
 
     int w = bottom_blob.w;
@@ -308,7 +320,7 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
         {
             if (kernel_w == 3 && kernel_h == 3 && dilation_w == 1 && dilation_h == 1 && stride_w == 1 && stride_h == 1)
             {
-                convdw3x3s1_packn_rvv(bottom_blob_bordered, top_blob, weight_data_packed, bias_data, opt);
+                convdw3x3s1_packn_rvv(bottom_blob_bordered, top_blob, weight_data_tm, bias_data, opt);
 
                 if (activation)
                 {
@@ -317,7 +329,7 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
             }
             else if (kernel_w == 3 && kernel_h == 3 && dilation_w == 1 && dilation_h == 1 && stride_w == 2 && stride_h == 2)
             {
-                convdw3x3s2_packn_rvv(bottom_blob_bordered, top_blob, weight_data_packed, bias_data, opt);
+                convdw3x3s2_packn_rvv(bottom_blob_bordered, top_blob, weight_data_tm, bias_data, opt);
 
                 if (activation)
                 {
@@ -326,7 +338,7 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
             }
             else if (kernel_w == 5 && kernel_h == 5 && dilation_w == 1 && dilation_h == 1 && stride_w == 1 && stride_h == 1)
             {
-                convdw5x5s1_packn_rvv(bottom_blob_bordered, top_blob, weight_data_packed, bias_data, opt);
+                convdw5x5s1_packn_rvv(bottom_blob_bordered, top_blob, weight_data_tm, bias_data, opt);
 
                 if (activation)
                 {
@@ -335,7 +347,7 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
             }
             else if (kernel_w == 5 && kernel_h == 5 && dilation_w == 1 && dilation_h == 1 && stride_w == 2 && stride_h == 2)
             {
-                convdw5x5s2_packn_rvv(bottom_blob_bordered, top_blob, weight_data_packed, bias_data, opt);
+                convdw5x5s2_packn_rvv(bottom_blob_bordered, top_blob, weight_data_tm, bias_data, opt);
 
                 if (activation)
                 {
@@ -369,32 +381,32 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
                 for (int g = 0; g < channels; g++)
                 {
                     float* outptr = top_blob.channel(g);
-                    const float* kptr = (const float*)weight_data_packed + maxk * g * packn;
+                    const float* kptr = (const float*)weight_data_tm + maxk * g * packn;
                     const Mat m = bottom_blob_bordered.channel(g);
 
                     for (int i = 0; i < outh; i++)
                     {
                         for (int j = 0; j < outw; j++)
                         {
-                            vfloat32m1_t _sum = vfmv_v_f_f32m1(0.f, vl);
+                            vfloat32m1_t _sum = __riscv_vfmv_v_f_f32m1(0.f, vl);
 
                             if (bias_term)
                             {
-                                _sum = vle32_v_f32m1((const float*)bias_data + g * packn, vl);
+                                _sum = __riscv_vle32_v_f32m1((const float*)bias_data + g * packn, vl);
                             }
 
                             const float* sptr = m.row(i * stride_h) + j * stride_w * packn;
 
                             for (int k = 0; k < maxk; k++)
                             {
-                                vfloat32m1_t _val = vle32_v_f32m1(sptr + space_ofs[k] * packn, vl);
-                                vfloat32m1_t _w = vle32_v_f32m1(kptr + k * packn, vl);
-                                _sum = vfmacc_vv_f32m1(_sum, _val, _w, vl);
+                                vfloat32m1_t _val = __riscv_vle32_v_f32m1(sptr + space_ofs[k] * packn, vl);
+                                vfloat32m1_t _w = __riscv_vle32_v_f32m1(kptr + k * packn, vl);
+                                _sum = __riscv_vfmacc_vv_f32m1(_sum, _val, _w, vl);
                             }
 
                             _sum = activation_ps(_sum, activation_type, activation_params, vl);
 
-                            vse32_v_f32m1(outptr + j * packn, _sum, vl);
+                            __riscv_vse32_v_f32m1(outptr + j * packn, _sum, vl);
                         }
 
                         outptr += outw * packn;
@@ -406,6 +418,25 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
 
         if (elempack == 1)
         {
+            if (kernel_w == 3 && kernel_h == 3 && dilation_w == 1 && dilation_h == 1 && stride_w == 1 && stride_h == 1)
+            {
+                convdw3x3s1_rvv(bottom_blob_bordered, top_blob, weight_data_tm, bias_data, opt);
+
+                if (activation)
+                {
+                    activation->forward_inplace(top_blob, opt);
+                }
+            }
+            else if (kernel_w == 3 && kernel_h == 3 && dilation_w == 1 && dilation_h == 1 && stride_w == 2 && stride_h == 2)
+            {
+                convdw3x3s2_rvv(bottom_blob_bordered, top_blob, weight_data_tm, bias_data, opt);
+
+                if (activation)
+                {
+                    activation->forward_inplace(top_blob, opt);
+                }
+            }
+            else
             {
                 const int maxk = kernel_w * kernel_h;
 
@@ -432,7 +463,7 @@ int ConvolutionDepthWise_riscv::forward(const Mat& bottom_blob, Mat& top_blob, c
                 for (int g = 0; g < group; g++)
                 {
                     float* outptr = top_blob.channel(g);
-                    const float* kptr = (const float*)weight_data + maxk * g;
+                    const float* kptr = (const float*)weight_data_tm + maxk * g;
                     const Mat m = bottom_blob_bordered.channel(g);
 
                     for (int i = 0; i < outh; i++)
@@ -541,7 +572,7 @@ int ConvolutionDepthWise_riscv::forward(const std::vector<Mat>& bottom_blobs, st
         return -100;
 
 #if NCNN_RVV
-    if (opt.use_fp16_storage && cpu_support_riscv_v() && cpu_support_riscv_zfh() && weight_data_flattened.elembits() == 16)
+    if (opt.use_fp16_storage && cpu_support_riscv_zvfh() && weight_data_flattened.elembits() == 16)
     {
         Mat weight_data_flattened_fp32;
         cast_float16_to_float32(weight_data_flattened, weight_data_flattened_fp32, opt);
@@ -563,7 +594,7 @@ int ConvolutionDepthWise_riscv::forward(const std::vector<Mat>& bottom_blobs, st
             return -100;
 
 #if NCNN_RVV
-        if (opt.use_fp16_storage && cpu_support_riscv_v() && cpu_support_riscv_zfh() && bias_data_flattened.elembits() == 16)
+        if (opt.use_fp16_storage && cpu_support_riscv_zvfh() && bias_data_flattened.elembits() == 16)
         {
             Mat bias_data_flattened_fp32;
             cast_float16_to_float32(bias_data_flattened, bias_data_flattened_fp32, opt);
@@ -577,7 +608,7 @@ int ConvolutionDepthWise_riscv::forward(const std::vector<Mat>& bottom_blobs, st
         bias_data_flattened.elempack = 1;
     }
 
-    ncnn::Layer* op = ncnn::create_layer(ncnn::LayerType::ConvolutionDepthWise);
+    ncnn::Layer* op = ncnn::create_layer_cpu(ncnn::LayerType::ConvolutionDepthWise);
 
     ncnn::ParamDict pd;
     pd.set(0, _num_output);
@@ -617,506 +648,5 @@ int ConvolutionDepthWise_riscv::forward(const std::vector<Mat>& bottom_blobs, st
 
     return 0;
 }
-
-#if __riscv_vector && __riscv_zfh
-int ConvolutionDepthWise_riscv::create_pipeline_fp16s(const Option& opt)
-{
-    const int packn = csrr_vlenb() / 2;
-
-    const int maxk = kernel_w * kernel_h;
-    int channels = (weight_data_size / group) / maxk / (num_output / group) * group;
-
-    // depth-wise
-    if (channels == group && group == num_output)
-    {
-        int elempack = 1;
-        if (opt.use_packing_layout)
-        {
-            elempack = channels % packn == 0 ? packn : 1;
-        }
-
-        // packn
-        if (elempack == packn)
-        {
-            Mat weight_data_r2 = weight_data.reshape(maxk, group);
-            Mat weight_data_r2_packed;
-            convert_packing(weight_data_r2, weight_data_r2_packed, packn, opt);
-
-            ncnn::cast_float32_to_float16(weight_data_r2_packed, weight_data_fp16, opt);
-        }
-
-        if (elempack == 1)
-        {
-            ncnn::cast_float32_to_float16(weight_data, weight_data_fp16, opt);
-        }
-
-        ncnn::cast_float32_to_float16(bias_data, bias_data_fp16, opt);
-
-        return 0;
-    }
-
-    // group convolution
-    create_group_ops(opt);
-
-    return 0;
-}
-
-int ConvolutionDepthWise_riscv::forward_fp16s(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
-{
-    const int packn = csrr_vlenb() / 2;
-    const word_type vl = vsetvl_e16m1(packn);
-
-    int w = bottom_blob.w;
-    int h = bottom_blob.h;
-    int channels = bottom_blob.c;
-    size_t elemsize = bottom_blob.elemsize;
-    int elempack = bottom_blob.elempack;
-
-    const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
-    const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
-
-    Mat bottom_blob_bordered;
-    make_padding(bottom_blob, bottom_blob_bordered, opt);
-    if (bottom_blob_bordered.empty())
-        return -100;
-
-    w = bottom_blob_bordered.w;
-    h = bottom_blob_bordered.h;
-
-    int outw = (w - kernel_extent_w) / stride_w + 1;
-    int outh = (h - kernel_extent_h) / stride_h + 1;
-    int out_elempack = (opt.use_packing_layout && num_output % packn == 0) ? packn : 1;
-    size_t out_elemsize = elemsize / elempack * out_elempack;
-
-    top_blob.create(outw, outh, num_output / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
-    if (top_blob.empty())
-        return -100;
-
-    // depth-wise
-    if (channels * elempack == group && group == num_output)
-    {
-        if (elempack == packn)
-        {
-            {
-                const int maxk = kernel_w * kernel_h;
-
-                // kernel offsets
-                std::vector<int> _space_ofs(maxk);
-                int* space_ofs = &_space_ofs[0];
-                {
-                    int p1 = 0;
-                    int p2 = 0;
-                    int gap = w * dilation_h - kernel_w * dilation_w;
-                    for (int i = 0; i < kernel_h; i++)
-                    {
-                        for (int j = 0; j < kernel_w; j++)
-                        {
-                            space_ofs[p1] = p2;
-                            p1++;
-                            p2 += dilation_w;
-                        }
-                        p2 += gap;
-                    }
-                }
-
-                #pragma omp parallel for num_threads(opt.num_threads)
-                for (int g = 0; g < channels; g++)
-                {
-                    __fp16* outptr = top_blob.channel(g);
-                    const __fp16* kptr = (const __fp16*)weight_data_fp16 + maxk * g * packn;
-                    const Mat m = bottom_blob_bordered.channel(g);
-
-                    for (int i = 0; i < outh; i++)
-                    {
-                        for (int j = 0; j < outw; j++)
-                        {
-                            vfloat32m2_t _sum = vfmv_v_f_f32m2(0.f, vl);
-
-                            if (bias_term)
-                            {
-                                _sum = vle32_v_f32m2((const float*)bias_data + g * packn, vl);
-                            }
-
-                            const __fp16* sptr = m.row<const __fp16>(i * stride_h) + j * stride_w * packn;
-
-                            for (int k = 0; k < maxk; k++)
-                            {
-                                vfloat16m1_t _val = vle16_v_f16m1(sptr + space_ofs[k] * packn, vl);
-                                vfloat16m1_t _w = vle16_v_f16m1(kptr + k * packn, vl);
-                                _sum = vfwmacc_vv_f32m2(_sum, _val, _w, vl);
-                            }
-
-                            _sum = activation_ps(_sum, activation_type, activation_params, vl);
-
-                            vse16_v_f16m1(outptr + j * packn, vfncvt_f_f_w_f16m1(_sum, vl), vl);
-                        }
-
-                        outptr += outw * packn;
-                    }
-                }
-            }
-        }
-
-        if (elempack == 1)
-        {
-            {
-                const int maxk = kernel_w * kernel_h;
-
-                // kernel offsets
-                std::vector<int> _space_ofs(maxk);
-                int* space_ofs = &_space_ofs[0];
-                {
-                    int p1 = 0;
-                    int p2 = 0;
-                    int gap = w * dilation_h - kernel_w * dilation_w;
-                    for (int i = 0; i < kernel_h; i++)
-                    {
-                        for (int j = 0; j < kernel_w; j++)
-                        {
-                            space_ofs[p1] = p2;
-                            p1++;
-                            p2 += dilation_w;
-                        }
-                        p2 += gap;
-                    }
-                }
-
-                #pragma omp parallel for num_threads(opt.num_threads)
-                for (int g = 0; g < group; g++)
-                {
-                    __fp16* outptr = top_blob.channel(g);
-                    const __fp16* kptr = (const __fp16*)weight_data_fp16 + maxk * g;
-                    const Mat m = bottom_blob_bordered.channel(g);
-
-                    for (int i = 0; i < outh; i++)
-                    {
-                        for (int j = 0; j < outw; j++)
-                        {
-                            float sum = 0.f;
-
-                            if (bias_term)
-                                sum = bias_data[g];
-
-                            const __fp16* sptr = m.row<const __fp16>(i * stride_h) + j * stride_w;
-
-                            for (int k = 0; k < maxk; k++)
-                            {
-                                float val = (float)sptr[space_ofs[k]];
-                                float w = (float)kptr[k];
-                                sum += val * w;
-                            }
-
-                            sum = activation_ss(sum, activation_type, activation_params);
-
-                            outptr[j] = (__fp16)sum;
-                        }
-
-                        outptr += outw;
-                    }
-                }
-            }
-        }
-
-        return 0;
-    }
-
-    // group convolution
-    const int channels_g = channels * elempack / group;
-    const int num_output_g = num_output / group;
-
-    int g_elempack = (opt.use_packing_layout && channels_g % packn == 0) ? packn : 1;
-    int out_g_elempack = (opt.use_packing_layout && num_output_g % packn == 0) ? packn : 1;
-
-    // unpacking
-    Mat bottom_blob_bordered_unpacked = bottom_blob_bordered;
-    if (elempack > g_elempack)
-    {
-        Option opt_p = opt;
-        opt_p.blob_allocator = opt.workspace_allocator;
-        convert_packing(bottom_blob_bordered, bottom_blob_bordered_unpacked, 1, opt_p);
-    }
-
-    Mat top_blob_unpacked = top_blob;
-    if (out_g_elempack < out_elempack)
-    {
-        top_blob_unpacked.create(outw, outh, num_output, out_elemsize / out_elempack, 1, opt.workspace_allocator);
-        if (top_blob_unpacked.empty())
-            return -100;
-    }
-
-    for (int g = 0; g < group; g++)
-    {
-        const Mat bottom_blob_bordered_g = bottom_blob_bordered_unpacked.channel_range(channels_g * g / g_elempack, channels_g / g_elempack);
-        Mat top_blob_g = top_blob_unpacked.channel_range(num_output_g * g / out_g_elempack, num_output_g / out_g_elempack);
-
-        const ncnn::Layer* op = group_ops[g];
-
-        Option opt_g = opt;
-        opt_g.blob_allocator = top_blob_unpacked.allocator;
-
-        // forward
-        op->forward(bottom_blob_bordered_g, top_blob_g, opt_g);
-    }
-
-    // packing
-    if (out_g_elempack < out_elempack)
-    {
-        convert_packing(top_blob_unpacked, top_blob, out_elempack, opt);
-    }
-    else
-    {
-        top_blob = top_blob_unpacked;
-    }
-
-    return 0;
-}
-
-int ConvolutionDepthWise_riscv::forward_fp16sa(const Mat& bottom_blob, Mat& top_blob, const Option& opt) const
-{
-    const int packn = csrr_vlenb() / 2;
-    const word_type vl = vsetvl_e16m1(packn);
-
-    int w = bottom_blob.w;
-    int h = bottom_blob.h;
-    int channels = bottom_blob.c;
-    size_t elemsize = bottom_blob.elemsize;
-    int elempack = bottom_blob.elempack;
-
-    const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
-    const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
-
-    Mat bottom_blob_bordered;
-    make_padding(bottom_blob, bottom_blob_bordered, opt);
-    if (bottom_blob_bordered.empty())
-        return -100;
-
-    w = bottom_blob_bordered.w;
-    h = bottom_blob_bordered.h;
-
-    int outw = (w - kernel_extent_w) / stride_w + 1;
-    int outh = (h - kernel_extent_h) / stride_h + 1;
-    int out_elempack = (opt.use_packing_layout && num_output % packn == 0) ? packn : 1;
-    size_t out_elemsize = elemsize / elempack * out_elempack;
-
-    top_blob.create(outw, outh, num_output / out_elempack, out_elemsize, out_elempack, opt.blob_allocator);
-    if (top_blob.empty())
-        return -100;
-
-    // depth-wise
-    if (channels * elempack == group && group == num_output)
-    {
-        if (elempack == packn)
-        {
-            if (kernel_w == 3 && kernel_h == 3 && dilation_w == 1 && dilation_h == 1 && stride_w == 1 && stride_h == 1)
-            {
-                convdw3x3s1_packn_fp16sa_rvv(bottom_blob_bordered, top_blob, weight_data_fp16, bias_data_fp16, opt);
-
-                if (activation)
-                {
-                    activation->forward_inplace(top_blob, opt);
-                }
-            }
-            else if (kernel_w == 3 && kernel_h == 3 && dilation_w == 1 && dilation_h == 1 && stride_w == 2 && stride_h == 2)
-            {
-                convdw3x3s2_packn_fp16sa_rvv(bottom_blob_bordered, top_blob, weight_data_fp16, bias_data_fp16, opt);
-
-                if (activation)
-                {
-                    activation->forward_inplace(top_blob, opt);
-                }
-            }
-            else if (kernel_w == 5 && kernel_h == 5 && dilation_w == 1 && dilation_h == 1 && stride_w == 1 && stride_h == 1)
-            {
-                convdw5x5s1_packn_fp16sa_rvv(bottom_blob_bordered, top_blob, weight_data_fp16, bias_data_fp16, opt);
-
-                if (activation)
-                {
-                    activation->forward_inplace(top_blob, opt);
-                }
-            }
-            else if (kernel_w == 5 && kernel_h == 5 && dilation_w == 1 && dilation_h == 1 && stride_w == 2 && stride_h == 2)
-            {
-                convdw5x5s2_packn_fp16sa_rvv(bottom_blob_bordered, top_blob, weight_data_fp16, bias_data_fp16, opt);
-
-                if (activation)
-                {
-                    activation->forward_inplace(top_blob, opt);
-                }
-            }
-            else
-            {
-                const int maxk = kernel_w * kernel_h;
-
-                // kernel offsets
-                std::vector<int> _space_ofs(maxk);
-                int* space_ofs = &_space_ofs[0];
-                {
-                    int p1 = 0;
-                    int p2 = 0;
-                    int gap = w * dilation_h - kernel_w * dilation_w;
-                    for (int i = 0; i < kernel_h; i++)
-                    {
-                        for (int j = 0; j < kernel_w; j++)
-                        {
-                            space_ofs[p1] = p2;
-                            p1++;
-                            p2 += dilation_w;
-                        }
-                        p2 += gap;
-                    }
-                }
-
-                #pragma omp parallel for num_threads(opt.num_threads)
-                for (int g = 0; g < channels; g++)
-                {
-                    __fp16* outptr = top_blob.channel(g);
-                    const __fp16* kptr = (const __fp16*)weight_data_fp16 + maxk * g * packn;
-                    const Mat m = bottom_blob_bordered.channel(g);
-
-                    for (int i = 0; i < outh; i++)
-                    {
-                        for (int j = 0; j < outw; j++)
-                        {
-                            vfloat16m1_t _sum = vfmv_v_f_f16m1((__fp16)0.f, vl);
-
-                            if (bias_term)
-                            {
-                                _sum = vle16_v_f16m1((const __fp16*)bias_data_fp16 + g * packn, vl);
-                            }
-
-                            const __fp16* sptr = m.row<const __fp16>(i * stride_h) + j * stride_w * packn;
-
-                            for (int k = 0; k < maxk; k++)
-                            {
-                                vfloat16m1_t _val = vle16_v_f16m1(sptr + space_ofs[k] * packn, vl);
-                                vfloat16m1_t _w = vle16_v_f16m1(kptr + k * packn, vl);
-                                _sum = vfmacc_vv_f16m1(_sum, _val, _w, vl);
-                            }
-
-                            _sum = activation_ps(_sum, activation_type, activation_params, vl);
-
-                            vse16_v_f16m1(outptr + j * packn, _sum, vl);
-                        }
-
-                        outptr += outw * packn;
-                    }
-                }
-            }
-        }
-
-        if (elempack == 1)
-        {
-            {
-                const int maxk = kernel_w * kernel_h;
-
-                // kernel offsets
-                std::vector<int> _space_ofs(maxk);
-                int* space_ofs = &_space_ofs[0];
-                {
-                    int p1 = 0;
-                    int p2 = 0;
-                    int gap = w * dilation_h - kernel_w * dilation_w;
-                    for (int i = 0; i < kernel_h; i++)
-                    {
-                        for (int j = 0; j < kernel_w; j++)
-                        {
-                            space_ofs[p1] = p2;
-                            p1++;
-                            p2 += dilation_w;
-                        }
-                        p2 += gap;
-                    }
-                }
-
-                #pragma omp parallel for num_threads(opt.num_threads)
-                for (int g = 0; g < group; g++)
-                {
-                    __fp16* outptr = top_blob.channel(g);
-                    const __fp16* kptr = (const __fp16*)weight_data_fp16 + maxk * g;
-                    const Mat m = bottom_blob_bordered.channel(g);
-
-                    for (int i = 0; i < outh; i++)
-                    {
-                        for (int j = 0; j < outw; j++)
-                        {
-                            float sum = 0.f;
-
-                            if (bias_term)
-                                sum = bias_data[g];
-
-                            const __fp16* sptr = m.row<const __fp16>(i * stride_h) + j * stride_w;
-
-                            for (int k = 0; k < maxk; k++)
-                            {
-                                __fp16 val = sptr[space_ofs[k]];
-                                __fp16 w = kptr[k];
-                                sum += val * w;
-                            }
-
-                            sum = activation_ss(sum, activation_type, activation_params);
-
-                            outptr[j] = (__fp16)sum;
-                        }
-
-                        outptr += outw;
-                    }
-                }
-            }
-        }
-
-        return 0;
-    }
-
-    // group convolution
-    const int channels_g = channels * elempack / group;
-    const int num_output_g = num_output / group;
-
-    int g_elempack = (opt.use_packing_layout && channels_g % packn == 0) ? packn : 1;
-    int out_g_elempack = (opt.use_packing_layout && num_output_g % packn == 0) ? packn : 1;
-
-    // unpacking
-    Mat bottom_blob_bordered_unpacked = bottom_blob_bordered;
-    if (elempack > g_elempack)
-    {
-        Option opt_p = opt;
-        opt_p.blob_allocator = opt.workspace_allocator;
-        convert_packing(bottom_blob_bordered, bottom_blob_bordered_unpacked, g_elempack, opt_p);
-    }
-
-    Mat top_blob_unpacked = top_blob;
-    if (out_g_elempack < out_elempack)
-    {
-        top_blob_unpacked.create(outw, outh, num_output / out_g_elempack, out_elemsize / out_elempack * out_g_elempack, out_g_elempack, opt.workspace_allocator);
-        if (top_blob_unpacked.empty())
-            return -100;
-    }
-
-    for (int g = 0; g < group; g++)
-    {
-        const Mat bottom_blob_bordered_g = bottom_blob_bordered_unpacked.channel_range(channels_g * g / g_elempack, channels_g / g_elempack);
-        Mat top_blob_g = top_blob_unpacked.channel_range(num_output_g * g / out_g_elempack, num_output_g / out_g_elempack);
-
-        const ncnn::Layer* op = group_ops[g];
-
-        Option opt_g = opt;
-        opt_g.blob_allocator = top_blob_unpacked.allocator;
-
-        // forward
-        op->forward(bottom_blob_bordered_g, top_blob_g, opt_g);
-    }
-
-    // packing
-    if (out_g_elempack < out_elempack)
-    {
-        convert_packing(top_blob_unpacked, top_blob, out_elempack, opt);
-    }
-    else
-    {
-        top_blob = top_blob_unpacked;
-    }
-
-    return 0;
-}
-#endif // __riscv_vector && __riscv_zfh
 
 } // namespace ncnn

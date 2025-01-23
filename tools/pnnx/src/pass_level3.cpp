@@ -14,15 +14,19 @@
 
 #include "pass_level3.h"
 
+#include "pass_level3/assign_unique_name.h"
+#include "pass_level3/eliminate_noop_math.h"
 #include "pass_level3/eliminate_tuple_pair.h"
 #include "pass_level3/expand_quantization_modules.h"
-#include "pass_level3/fuse_attribute_expression.h"
-#include "pass_level3/fuse_cat_tensors.h"
-#include "pass_level3/fuse_chunk_split_unpack.h"
+#include "pass_level3/fuse_opnto1_tensors.h"
+#include "pass_level3/fuse_op1ton_unpack.h"
+#include "pass_level3/fuse_dynamic_adaptive_pool.h"
+#include "pass_level3/fuse_einsum_operands.h"
 #include "pass_level3/fuse_expression.h"
+#include "pass_level3/fuse_index_expression.h"
+#include "pass_level3/fuse_maxpool_unpack.h"
+#include "pass_level3/fuse_multiheadattention_unpack.h"
 #include "pass_level3/fuse_rnn_unpack.h"
-#include "pass_level3/rename_F_conv_transposend.h"
-#include "pass_level3/rename_F_convmode.h"
 #include "pass_level3/rename_F_dropoutnd.h"
 
 // #include "pass_level4/canonicalize.h"
@@ -31,27 +35,35 @@
 
 namespace pnnx {
 
-void pass_level3(Graph& g)
+void pass_level3(Graph& g, const std::set<std::string>& foldable_constants, const std::string& foldable_constants_zippath)
 {
-    fuse_cat_tensors(g);
+    assign_unique_name(g);
 
-    fuse_chunk_split_unpack(g);
+    fuse_opnto1_tensors(g);
+
+    fuse_op1ton_unpack(g);
+
+    fuse_einsum_operands(g);
+
+    fuse_maxpool_unpack(g);
+
+    fuse_multiheadattention_unpack(g);
 
     fuse_rnn_unpack(g);
 
-    expand_quantization_modules(g);
+    fuse_dynamic_adaptive_pool(g);
 
-    fuse_attribute_expression(g);
+    expand_quantization_modules(g);
 
     eliminate_tuple_pair(g);
 
-    rename_F_conv_transposend(g);
-
-    rename_F_convmode(g);
-
     rename_F_dropoutnd(g);
 
-    fuse_expression(g);
+    eliminate_noop_math(g);
+
+    fuse_expression(g, foldable_constants, foldable_constants_zippath);
+
+    fuse_index_expression(g);
 
     //     dead_code_elimination(g);
 

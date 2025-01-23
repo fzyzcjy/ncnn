@@ -22,17 +22,13 @@ public:
     const char* match_pattern_graph() const
     {
         return R"PNNXIR(7767517
-11 10
+7 6
 pnnx.Input              input       0 1 input
-prim::Constant          op_0        0 1 keepdim value=True
-prim::Constant          op_1        0 1 p value=%p
-prim::Constant          op_2        0 1 dim value=%dim
-prim::Constant          op_3        0 1 eps value=%eps
-prim::ListConstruct     op_4        1 1 dim dims
-aten::norm              op_5        4 1 input p dims keepdim 9
-aten::clamp_min         op_6        2 1 9 eps 11
-aten::expand_as         op_7        2 1 11 input denorm
-aten::div               op_8        2 1 input denorm out
+torch.norm              op_0        1 1 input 9 p=%p dim=(%dim) keepdim=True
+prim::Constant          op_1        0 1 eps value=%eps
+aten::clamp_min         op_2        2 1 9 eps 11
+Tensor.expand_as        op_3        2 1 11 input denorm
+aten::div               op_4        2 1 input denorm out
 pnnx.Output             output      1 0 out
 )PNNXIR";
     }
@@ -43,6 +39,25 @@ pnnx.Output             output      1 0 out
     }
 };
 
-REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(F_normalize, 10)
+class F_normalize_dims : public F_normalize
+{
+public:
+    const char* match_pattern_graph() const
+    {
+        return R"PNNXIR(7767517
+7 6
+pnnx.Input              input       0 1 input
+torch.norm              op_0        1 1 input 9 p=%p dim=%dim keepdim=True
+prim::Constant          op_1        0 1 eps value=%eps
+aten::clamp_min         op_2        2 1 9 eps 11
+Tensor.expand_as        op_3        2 1 11 input denorm
+aten::div               op_4        2 1 input denorm out
+pnnx.Output             output      1 0 out
+)PNNXIR";
+    }
+};
+
+REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(F_normalize, 130)
+REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(F_normalize_dims, 131)
 
 } // namespace pnnx

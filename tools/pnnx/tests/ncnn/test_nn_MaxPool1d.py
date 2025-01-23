@@ -15,6 +15,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging import version
 
 class Model(nn.Module):
     def __init__(self):
@@ -25,18 +26,30 @@ class Model(nn.Module):
         self.pool_2 = nn.MaxPool1d(kernel_size=3, stride=1, padding=1, dilation=1, return_indices=False, ceil_mode=False)
         self.pool_3 = nn.MaxPool1d(kernel_size=5, stride=2, padding=2, dilation=1, return_indices=False, ceil_mode=True)
         self.pool_4 = nn.MaxPool1d(kernel_size=3, stride=1, padding=1, dilation=1, return_indices=False, ceil_mode=False)
-        self.pool_5 = nn.MaxPool1d(kernel_size=2, stride=1, padding=0, dilation=1, return_indices=False, ceil_mode=True)
+        self.pool_5 = nn.MaxPool1d(kernel_size=2, stride=1, padding=0, dilation=1, return_indices=True, ceil_mode=True)
         self.pool_6 = nn.MaxPool1d(kernel_size=5, stride=1, padding=2, dilation=1, return_indices=False, ceil_mode=False)
 
     def forward(self, x):
+        y = x.reshape(12, 64)
+
         x = self.pool_0(x)
         x = self.pool_1(x)
         x = self.pool_2(x)
         x = self.pool_3(x)
         x = self.pool_4(x)
-        x = self.pool_5(x)
+        x, tx = self.pool_5(x)
         x = self.pool_6(x)
-        return x
+
+        y = self.pool_0(y)
+        y = self.pool_1(y)
+        y = self.pool_2(y)
+        y = self.pool_3(y)
+        y = self.pool_4(y)
+        if version.parse(torch.__version__) < version.parse('1.10'):
+            y = y.unsqueeze(0)
+        y, ty = self.pool_5(y)
+        y = self.pool_6(y)
+        return x, y
 
 def test():
     net = Model()
@@ -59,7 +72,10 @@ def test():
     import test_nn_MaxPool1d_ncnn
     b = test_nn_MaxPool1d_ncnn.test_inference()
 
-    return torch.allclose(a, b, 1e-4, 1e-4)
+    for a0, b0 in zip(a, b):
+        if not torch.allclose(a0, b0, 1e-4, 1e-4):
+            return False
+    return True
 
 if __name__ == "__main__":
     if test():

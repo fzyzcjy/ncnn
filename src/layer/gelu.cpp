@@ -14,8 +14,6 @@
 
 #include "gelu.h"
 
-#include <math.h>
-
 namespace ncnn {
 
 GELU::GELU()
@@ -26,7 +24,7 @@ GELU::GELU()
 
 int GELU::load_param(const ParamDict& pd)
 {
-    fast_gelu = pd.get(0, 0) != 0;
+    fast_gelu = pd.get(0, 0);
 
     return 0;
 }
@@ -35,8 +33,9 @@ int GELU::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
 {
     int w = bottom_top_blob.w;
     int h = bottom_top_blob.h;
+    int d = bottom_top_blob.d;
     int channels = bottom_top_blob.c;
-    int size = w * h;
+    int size = w * h * d;
 
     if (fast_gelu)
     {

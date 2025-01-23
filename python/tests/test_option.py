@@ -27,7 +27,7 @@ def test_option():
     opt.lightmode = False
     assert opt.lightmode == False
 
-    assert opt.num_threads == ncnn.get_cpu_count()
+    assert opt.num_threads == ncnn.get_physical_big_cpu_count()
     opt.num_threads = 1
     assert opt.num_threads == 1
 
@@ -137,8 +137,3 @@ def test_option():
     assert opt.use_tensor_storage == True
     opt.use_tensor_storage = False
     assert opt.use_tensor_storage == False
-
-    opt.use_weight_fp16_storage = True
-    assert opt.use_weight_fp16_storage == True
-    opt.use_weight_fp16_storage = False
-    assert opt.use_weight_fp16_storage == False

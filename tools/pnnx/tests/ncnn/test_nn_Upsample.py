@@ -15,6 +15,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging import version
 
 class Model(nn.Module):
     def __init__(self):
@@ -27,18 +28,27 @@ class Model(nn.Module):
         self.up_1d_1_0 = nn.Upsample(size=16, mode='linear')
         self.up_1d_1_1 = nn.Upsample(scale_factor=2, mode='linear')
         self.up_1d_1_2 = nn.Upsample(size=(24), mode='linear', align_corners=True)
-        self.up_1d_1_3 = nn.Upsample(scale_factor=(3), mode='linear', align_corners=True)
+        if version.parse(torch.__version__) >= version.parse('1.11'):
+            self.up_1d_1_3 = nn.Upsample(scale_factor=(3.5), mode='linear', align_corners=True, recompute_scale_factor=True)
+        else:
+            self.up_1d_1_3 = nn.Upsample(scale_factor=(3.5), mode='linear', align_corners=True)
 
         self.up_2d_0_0 = nn.Upsample(size=16)
         self.up_2d_0_1 = nn.Upsample(scale_factor=2, mode='nearest')
         self.up_2d_0_2 = nn.Upsample(size=(20,20), mode='nearest')
-        self.up_2d_0_3 = nn.Upsample(scale_factor=(4,4), mode='nearest')
+        if version.parse(torch.__version__) >= version.parse('1.11'):
+            self.up_2d_0_3 = nn.Upsample(scale_factor=(4,4.5), mode='nearest', recompute_scale_factor=True)
+        else:
+            self.up_2d_0_3 = nn.Upsample(scale_factor=(4,4.5), mode='nearest')
         self.up_2d_0_4 = nn.Upsample(size=(16,24), mode='nearest')
         self.up_2d_0_5 = nn.Upsample(scale_factor=(2,3), mode='nearest')
         self.up_2d_1_0 = nn.Upsample(size=16, mode='bilinear')
         self.up_2d_1_1 = nn.Upsample(scale_factor=2, mode='bilinear')
         self.up_2d_1_2 = nn.Upsample(size=(20,20), mode='bilinear', align_corners=False)
-        self.up_2d_1_3 = nn.Upsample(scale_factor=(4,4), mode='bilinear', align_corners=False)
+        if version.parse(torch.__version__) >= version.parse('1.11'):
+            self.up_2d_1_3 = nn.Upsample(scale_factor=(4,4.5), mode='bilinear', align_corners=False, recompute_scale_factor=True)
+        else:
+            self.up_2d_1_3 = nn.Upsample(scale_factor=(4,4.5), mode='bilinear', align_corners=False)
         self.up_2d_1_4 = nn.Upsample(size=(16,24), mode='bilinear', align_corners=True)
         self.up_2d_1_5 = nn.Upsample(scale_factor=(2,3), mode='bilinear', align_corners=True)
         self.up_2d_2_0 = nn.Upsample(size=16, mode='bicubic')
@@ -46,9 +56,14 @@ class Model(nn.Module):
         self.up_2d_2_2 = nn.Upsample(size=(20,20), mode='bicubic', align_corners=False)
         self.up_2d_2_3 = nn.Upsample(scale_factor=(4,4), mode='bicubic', align_corners=False)
         self.up_2d_2_4 = nn.Upsample(size=(16,24), mode='bicubic', align_corners=True)
-        self.up_2d_2_5 = nn.Upsample(scale_factor=(2,3), mode='bicubic', align_corners=True)
+        if version.parse(torch.__version__) >= version.parse('1.11'):
+            self.up_2d_2_5 = nn.Upsample(scale_factor=(2,3.5), mode='bicubic', align_corners=True, recompute_scale_factor=True)
+        else:
+            self.up_2d_2_5 = nn.Upsample(scale_factor=(2,3.5), mode='bicubic', align_corners=True)
 
-    def forward(self, x, y):
+        self.up_w = nn.Upsample(scale_factor=(1.499,1.499), mode='nearest')
+
+    def forward(self, x, y, w):
         x = self.up_1d_0_0(x)
         x = self.up_1d_0_1(x)
         x = self.up_1d_0_2(x)
@@ -77,7 +92,9 @@ class Model(nn.Module):
         y = self.up_2d_2_4(y)
         y = self.up_2d_2_5(y)
 
-        return x, y
+        w = self.up_w(w)
+
+        return x, y, w
 
 def test():
     net = Model()
@@ -86,16 +103,17 @@ def test():
     torch.manual_seed(0)
     x = torch.rand(1, 3, 32)
     y = torch.rand(1, 3, 32, 32)
+    w = torch.rand(1, 8, 12, 12)
 
-    a = net(x, y)
+    a = net(x, y, w)
 
     # export torchscript
-    mod = torch.jit.trace(net, (x, y))
+    mod = torch.jit.trace(net, (x, y, w))
     mod.save("test_nn_Upsample.pt")
 
     # torchscript to pnnx
     import os
-    os.system("../../src/pnnx test_nn_Upsample.pt inputshape=[1,3,32],[1,3,32,32]")
+    os.system("../../src/pnnx test_nn_Upsample.pt inputshape=[1,3,32],[1,3,32,32],[1,8,12,12]")
 
     # ncnn inference
     import test_nn_Upsample_ncnn

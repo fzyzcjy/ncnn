@@ -37,19 +37,17 @@ pnnx.Output             output      1 0 out
     }
 };
 
-REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(torch_clamp, 20)
+REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(torch_clamp, 40)
 
-class torch_clamp_1 : public GraphRewriterPass
+class torch_clamp_onnx : public GraphRewriterPass
 {
 public:
     const char* match_pattern_graph() const
     {
         return R"PNNXIR(7767517
-5 4
-pnnx.Input              input_0     0 1 input
-pnnx.Input              input_1     0 1 min
-pnnx.Input              input_2     0 1 max
-aten::clamp_            op_0        3 1 input min max out
+3 2
+pnnx.Input              input       0 1 input
+Clip                    op_0        1 1 input out min=%min max=%max
 pnnx.Output             output      1 0 out
 )PNNXIR";
     }
@@ -60,6 +58,60 @@ pnnx.Output             output      1 0 out
     }
 };
 
-REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(torch_clamp_1, 20)
+REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(torch_clamp_onnx, 40)
+
+class torch_clamp_onnx_1 : public GraphRewriterPass
+{
+public:
+    const char* match_pattern_graph() const
+    {
+        return R"PNNXIR(7767517
+3 2
+pnnx.Input              input       0 1 input
+Clip                    op_0        1 1 input out max=%max
+pnnx.Output             output      1 0 out
+)PNNXIR";
+    }
+
+    const char* type_str() const
+    {
+        return "torch.clamp";
+    }
+
+    void write(Operator* op, const std::map<std::string, Parameter>& captured_params) const
+    {
+        op->params["min"] = Parameter();
+        op->params["max"] = captured_params.at("max");
+    }
+};
+
+REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(torch_clamp_onnx_1, 40)
+
+class torch_clamp_onnx_2 : public GraphRewriterPass
+{
+public:
+    const char* match_pattern_graph() const
+    {
+        return R"PNNXIR(7767517
+3 2
+pnnx.Input              input       0 1 input
+Clip                    op_0        1 1 input out min=%min
+pnnx.Output             output      1 0 out
+)PNNXIR";
+    }
+
+    const char* type_str() const
+    {
+        return "torch.clamp";
+    }
+
+    void write(Operator* op, const std::map<std::string, Parameter>& captured_params) const
+    {
+        op->params["max"] = Parameter();
+        op->params["min"] = captured_params.at("min");
+    }
+};
+
+REGISTER_GLOBAL_PNNX_GRAPH_REWRITER_PASS(torch_clamp_onnx_2, 40)
 
 } // namespace pnnx

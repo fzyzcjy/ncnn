@@ -124,14 +124,9 @@ int ConvolutionDepthWise::load_model(const ModelBin& mb)
     }
 #endif // NCNN_INT8
 
-    return 0;
-}
-
-int ConvolutionDepthWise::create_pipeline(const Option& opt)
-{
 #if NCNN_INT8
     // runtime quantize the weight data
-    if (opt.use_int8_inference && weight_data.elemsize == (size_t)4u && int8_scale_term)
+    if (weight_data.elemsize == (size_t)4u && int8_scale_term)
     {
         Mat int8_weight_data(weight_data_size, (size_t)1u);
         if (int8_weight_data.empty())
@@ -141,7 +136,8 @@ int ConvolutionDepthWise::create_pipeline(const Option& opt)
 
         for (int g = 0; g < group; g++)
         {
-            Option opt_q = opt;
+            Option opt_q;
+            opt_q.num_threads = 1;
             opt_q.blob_allocator = int8_weight_data.allocator;
             opt_q.use_packing_layout = false;
 
@@ -243,11 +239,9 @@ static int convolutiondepthwise(const Mat& bottom_blob, Mat& top_blob, const Mat
                 float* outptr = top_blob.channel(g * outch_g + p);
                 const float* weight_data_ptr = (const float*)weight_data + maxk * inch_g * outch_g * g;
 
-#if NCNN_SIMPLEOMP
                 // shadowed variable for less openmp task args
                 const int outw = top_blob.w;
                 const int outh = top_blob.h;
-#endif
 
                 for (int i = 0; i < outh; i++)
                 {
